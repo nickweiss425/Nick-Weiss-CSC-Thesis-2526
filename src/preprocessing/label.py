@@ -32,14 +32,14 @@ def label_data(trial_folder: str, total_frames: int):
         label = item['label']
         start_time = (item['start_frame'] - 1) / fps
         end_time = (item['end_frame'] - 1) / fps
-        df.loc[(df["Time (s)"] >= start_time) & (df["Time (s)"] <= end_time), "Primitive"] = label
+        df.loc[(df["Time (s)"] >= start_time) & (df["Time (s)"] < end_time), "Primitive"] = label
 
-        mask = (df["Time (s)"] >= start_time) & (df["Time (s)"] <= end_time)
-        indices = df.index[mask]
+        # mask = (df["Time (s)"] >= start_time) & (df["Time (s)"] < end_time)
+        # indices = df.index[mask]
 
-        if not indices.empty:
-            df.loc[indices[0], "Primitive"] = "Start"
-            df.loc[indices[-1], "Primitive"] = "End"
+        # if not indices.empty:
+        #     df.loc[indices[0], "Primitive"] = "Start"
+        #     df.loc[indices[-1], "Primitive"] = "End"
     
     df.to_csv(trial_folder + "labeled.csv", index=False)   
 
