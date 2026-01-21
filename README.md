@@ -52,9 +52,7 @@ Convert the final trimmed video to an exact constant frame rate (120 fps). This 
 ### 6. Verify Frame Rate and Frame Count
 Confirm that the labeling master is truly constant frame rate and obtain the authoritative frame count.
 
-    ffprobe -count_frames -select_streams v:0 \
-      -show_entries stream=nb_read_frames,avg_frame_rate,duration \
-      -of default=noprint_wrappers=1 labeling_master_CFR120.mp4
+    fffprobe -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,avg_frame_rate,duration -of default=noprint_wrappers=1 labeling_master_CFR120.mp4
 
 Verify:
 - avg_frame_rate = 120/1
