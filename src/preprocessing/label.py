@@ -1,10 +1,11 @@
 import numpy as np
 import pandas as pd 
 import json
+import os
 
-def label_data(trial_folder: str, total_frames: int):
-    json_path = trial_folder + "labels" + ".json"
-    df = pd.read_csv(trial_folder + "trimmed_synced.csv")
+def label_data(trial_folder: str, participant_id: str, fps: float=120.0):
+    json_path = os.path.join(trial_folder, "labels.json")
+    df = pd.read_csv(os.path.join(trial_folder, "trimmed_synced.csv"))
 
     # load JSON labels
     with open(json_path, "r") as f:
@@ -13,6 +14,12 @@ def label_data(trial_folder: str, total_frames: int):
     # collect start/end frames per annotation
     annotations_list = []
     for task in data:
+        
+        video_path = task["data"]["video"]
+
+        # only use annotations for this participant
+        if participant_id not in video_path:
+            continue
         for annotation in task.get("annotations", []):
             for result in annotation.get("result", []):
                 label = result["value"]["timelinelabels"][0]
@@ -25,8 +32,6 @@ def label_data(trial_folder: str, total_frames: int):
                     "end_frame": end
                 })
 
-    # get fps of video
-    fps = get_fps(df, total_frames)
 
     for item in annotations_list:
         label = item['label']
@@ -41,12 +46,7 @@ def label_data(trial_folder: str, total_frames: int):
         #     df.loc[indices[0], "Primitive"] = "Start"
         #     df.loc[indices[-1], "Primitive"] = "End"
     
-    df.to_csv(trial_folder + "labeled.csv", index=False)   
+    df.to_csv(os.path.join(trial_folder, "labeled.csv"), index=False)   
 
 
 
-def get_fps(df, frames):
-    start = df.iloc[0]['Time (s)']
-    end = df.iloc[-1]['Time (s)']
-    dt = end - start
-    return frames / dt

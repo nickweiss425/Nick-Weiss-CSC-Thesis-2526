@@ -1,9 +1,10 @@
 import numpy as np
 import pandas as pd
+import os
 
 def sync_data_with_video(csv_path: str, trimmed_vid_len: float):
     # get dataframe of merged sensor data
-    df = pd.read_csv(csv_path + "merged.csv")
+    df = pd.read_csv(os.path.join(csv_path,"merged.csv"))
 
     # start time should be when the event marker goes high
     start_time = df.loc[df['Event_Marker'] > 0, 'Time (s)'].iloc[0]
@@ -14,11 +15,11 @@ def sync_data_with_video(csv_path: str, trimmed_vid_len: float):
     # reset the time column to start from 0 again
     synced_df["Time (s)"] = synced_df["Time (s)"] - start_time
     synced_df.reset_index(drop=True, inplace=True)
-    synced_df.to_csv(csv_path + "synced.csv", index=False)
+    synced_df.to_csv(os.path.join(csv_path, "synced.csv"), index=False)
 
 
 def drop_initial_setup_time(csv_path: str, start_time: float):
-    df = pd.read_csv(csv_path + "synced.csv")
+    df = pd.read_csv(os.path.join(csv_path,"synced.csv"))
 
     # only include rows that are past the start time
     df = df[df['Time (s)'] > start_time].reset_index(drop=True)
@@ -27,6 +28,6 @@ def drop_initial_setup_time(csv_path: str, start_time: float):
     first_timestamp = df.iloc[0]['Time (s)']
     df['Time (s)'] = df['Time (s)'] - first_timestamp
 
-    df.to_csv(csv_path + "trimmed_synced.csv", index=False)   
+    df.to_csv(os.path.join(csv_path, "trimmed_synced.csv"), index=False)   
 
     

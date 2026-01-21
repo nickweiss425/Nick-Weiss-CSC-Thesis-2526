@@ -1,0 +1,5 @@
+Start (Trim 1): 24.64
+End (Trim 1): 1057.71
+
+Start (Trim 2): 91.29
+End(Trim 2): 1033.70

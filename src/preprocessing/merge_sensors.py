@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import os
 
 def merge_and_clean_sensor_data(data_path: str, sensor_names: list, output_path: str):
     sensor_dict = get_master_nonmaster_sensors(data_path, sensor_names)
@@ -48,7 +49,7 @@ def merge_and_clean_sensor_data(data_path: str, sensor_names: list, output_path:
         })
     merged = merged.rename(columns=rename_map)
 
-    merged.to_csv(output_path + "merged.csv", index=False)
+    merged.to_csv(os.path.join(output_path,"merged.csv"), index=False)
 
 
 
@@ -121,7 +122,7 @@ def get_master_nonmaster_sensors(data_path: str, sensor_names: list):
 
     for sensor in sensor_names:
         # read the raw data from each sensor
-        df_raw = pd.read_csv(data_path + sensor + ".csv", sep='\t', skiprows=1)
+        df_raw = pd.read_csv(os.path.join(data_path, f"{sensor}.csv"), sep='\t', skiprows=1)
         df_raw = df_raw.drop(columns=[col for col in df_raw.columns if "Unnamed" in col], errors='ignore')
 
         # first row contains units - remove it and reset index

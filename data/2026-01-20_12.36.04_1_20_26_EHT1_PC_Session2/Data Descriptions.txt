@@ -1,0 +1,18 @@
+Time zone
+------------------------------
+America/Los_Angeles (UTC -08:00)
+
+Trial Description
+------------------------------
+No description available
+
+
+Session 2 - PC Recording
+------------------------------
+No description available
+
+Events: 
+Code	Counter	Name	Descripton
+1	1	Pulse	Pulse event marker generates a pulse. The duration of the pulse is 1 sample.
+2	1	Toggle	Toggle event marker generates a toggle. The duration of the toggle is user dependent.
+
