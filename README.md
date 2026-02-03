@@ -43,7 +43,7 @@ Open `trimmed_stage1.mp4` and determine the duration between the start of the vi
 Record:
 - `setup_buffer_s`: setup buffer duration in seconds
 
-This value is estimated manually by visual inspection and may vary by participant.
+This value is estimated manually by visual inspection and will vary by participant.
 
 ---
 
