@@ -18,11 +18,11 @@ def sync_data_with_video(csv_path: str, trimmed_vid_len: float):
     synced_df.to_csv(os.path.join(csv_path, "synced.csv"), index=False)
 
 
-def drop_initial_setup_time(csv_path: str, start_time: float):
+def drop_initial_setup_time(csv_path: str, setup_buffer_s: float):
     df = pd.read_csv(os.path.join(csv_path,"synced.csv"))
 
     # only include rows that are past the start time
-    df = df[df['Time (s)'] > start_time].reset_index(drop=True)
+    df = df[df['Time (s)'] >= setup_buffer_s].reset_index(drop=True)
 
     # re-zero the time column
     first_timestamp = df.iloc[0]['Time (s)']
