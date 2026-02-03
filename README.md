@@ -31,7 +31,7 @@ For each participant, the pre-windowing pipeline consists of:
 This step produces `labeled.csv` for a given participant. It is typically run per participant after labeling is completed in Label Studio.
 
 **Script**
-- `sync_and_label.py` (or equivalent step-1 entry point)
+- `sync_and_label.py`
 
 **Input**
 - Raw Shimmer CSV files
@@ -42,10 +42,7 @@ This step produces `labeled.csv` for a given participant. It is typically run pe
 - `labeled.csv` (continuous, time-aligned, labeled sensor data)
 
 **Example**
-    python sync_and_label.py \
-      --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" \
-      --participant P32 \
-      --sensors A5F2 A19E
+    python sync_and_label.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --participant P32 --sensors A5F2 A19E
 
 ---
 
