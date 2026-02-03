@@ -28,7 +28,8 @@ def main(participant_id, data_root, sensors_used):
     # use the event marker and video length to synchronize video and data file
     sync_data_with_video(trial_path, trimmed_duration)
 
-    # after event marker goes high, there is a period of setup time --> trim this off of video and data file
+    # after event marker goes high, there is a period of setup time before participant starts performing activities
+    # trim this off of video and data file
     setup_buffer_s = trimmed_duration - trimmed_finalized_duration
     print(f"Setup Time: {setup_buffer_s}")
     drop_initial_setup_time(trial_path, setup_buffer_s)
