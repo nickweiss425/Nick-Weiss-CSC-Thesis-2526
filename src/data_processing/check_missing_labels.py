@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 
-DATA_ROOT = "./data"        # adjust if needed
+DATA_ROOT = "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data"        
 LABEL_COL = "Primitive"
 
 def main():
@@ -32,13 +32,13 @@ def main():
             found_any = True
             print(f"[FOUND] {pid}: {n_missing} missing '{LABEL_COL}' values")
 
-            # optional: show first few indices + timestamps
+            # show first few indices + timestamps
             preview = df.loc[missing_mask, ["Time (s)", LABEL_COL]].head()
             print(preview)
             print("-" * 40)
 
     if not found_any:
-        print("No missing Primitive labels found 🎉")
+        print("No missing Primitive labels found")
 
 if __name__ == "__main__":
     main()
