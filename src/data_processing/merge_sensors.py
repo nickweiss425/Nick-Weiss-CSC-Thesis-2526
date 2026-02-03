@@ -3,6 +3,7 @@ import pandas as pd
 import os
 
 def merge_and_clean_sensor_data(data_path: str, sensor_names: list, output_path: str):
+    # identify the master and nonmaster sensors to aid in syncing
     sensor_dict = get_master_nonmaster_sensors(data_path, sensor_names)
     master_sensor = sensor_dict["master"]
     nonmaster_sensor = sensor_dict["nonmaster"]
@@ -10,19 +11,26 @@ def merge_and_clean_sensor_data(data_path: str, sensor_names: list, output_path:
     sensor_dfs = sensor_dict["dataframes"]
     df_master = sensor_dfs[master_sensor]
     df_nonmaster = sensor_dfs[nonmaster_sensor]
+
+    # merge the two dataframes into one df
     merged = merge_sensor_data(df_master=df_master, 
                         t_master=f'Shimmer_{master_sensor}_TimestampSync_Unix_CAL',
                         master_name=master_sensor, 
                         df_other=df_nonmaster,
                         t_other=f'Shimmer_{nonmaster_sensor}_TimestampSync_Unix_CAL',
                         other_name=nonmaster_sensor,
-                        tolerance=10,
+                        tolerance=3, # ms (timestamps are Unix ms)
                         keep_other_time=False
                         )
 
     # convert timestamp to relative time (seconds)
     if f'Shimmer_{master_sensor}_TimestampSync_Unix_CAL' in merged.columns:
         merged['Time (s)'] = (merged[f'Shimmer_{master_sensor}_TimestampSync_Unix_CAL'] - merged[f'Shimmer_{master_sensor}_TimestampSync_Unix_CAL'].iloc[0]) / 1000
+
+    # check match rate using the nonmaster timestamp column presence after merge
+    nonmaster_any_col = f"Shimmer_{nonmaster_sensor}_Accel_LN_X_CAL"
+    match_rate = 1.0 - merged[nonmaster_any_col].isna().mean()
+    print(f"Nonmaster match rate: {match_rate:.3f}")
 
     # drop unwanted columns
     drop_cols = []
@@ -49,6 +57,7 @@ def merge_and_clean_sensor_data(data_path: str, sensor_names: list, output_path:
         })
     merged = merged.rename(columns=rename_map)
 
+    # save to csv
     merged.to_csv(os.path.join(output_path,"merged.csv"), index=False)
 
 
@@ -60,7 +69,7 @@ def merge_sensor_data(
     df_other: pd.DataFrame,
     t_other: str,
     other_name: str,
-    tolerance: float = 10,   # milliseconds
+    tolerance: float = 2,   # milliseconds
     keep_other_time: bool = False
     ) -> pd.DataFrame:
         """
@@ -80,7 +89,6 @@ def merge_sensor_data(
     tolerance : float, default 10ms
         Max allowed absolute time difference  for a match. Rows without a
         nearby sample within this window remain NaN for the other sensor's columns.
-        For 50 Hz (20 ms period), ±10 ms is a good default.
     keep_other_time : bool, default False
         If True, keep df_other's time column (it will be renamed with the prefix).
         If False, drop it (you'll have a single, master time column).
@@ -91,11 +99,26 @@ def merge_sensor_data(
         df_master columns (unchanged) + df_other columns (prefixed), aligned to the
         master timeline, with a single master time column unless keep_other_time=True.
     """
-        # Safety: merge_asof requires sorted keys
+        # safety: merge_asof requires sorted keys
         left = df_master.sort_values(t_master).reset_index(drop=True)
+
+        # check to make sure event marker column exists
+        event_marker_master_col = f'Shimmer_{master_name}_Event_Marker_CAL'
+
+        if event_marker_master_col not in left.columns:
+                raise ValueError(
+                    f"Master sensor '{master_name}' does not contain an event marker column"
+                )
+        # rename master EM column to be general (will be in merged csv)
         left = left.rename(columns={f'Shimmer_{master_name}_Event_Marker_CAL': 'Event_Marker'})
+
         right = df_other.sort_values(t_other).reset_index(drop=True)
-        right = right.drop(f'Shimmer_{other_name}_Event_Marker_CAL', axis=1)
+        event_marker_other_col = f'Shimmer_{other_name}_Event_Marker_CAL'
+        if event_marker_other_col not in right.columns:
+                raise ValueError(
+                    f"Other sensor '{other_name}' does not contain an event marker column"
+                )
+        right = right.drop(columns=[event_marker_other_col])
         
         merged = pd.merge_asof(
             left,
@@ -115,15 +138,24 @@ def merge_sensor_data(
 
 
 def get_master_nonmaster_sensors(data_path: str, sensor_names: list):
+    if len(sensor_names) != 2:
+        raise ValueError(f"Expected exactly 2 sensors, got {len(sensor_names)}: {sensor_names}")
+
+
     # dictionary to hold sensor name and dataframe associated
     dfs = {}
     latest_starting_time = None
     earliest_ending_time = None
 
     for sensor in sensor_names:
+        csv_file = os.path.join(data_path, f"{sensor}.csv")
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"Missing sensor file: {csv_file}")
+        
         # read the raw data from each sensor
-        df_raw = pd.read_csv(os.path.join(data_path, f"{sensor}.csv"), sep='\t', skiprows=1)
+        df_raw = pd.read_csv(csv_file, sep='\t', skiprows=1)
         df_raw = df_raw.drop(columns=[col for col in df_raw.columns if "Unnamed" in col], errors='ignore')
+
 
         # first row contains units - remove it and reset index
         df = df_raw.iloc[1:].reset_index(drop=True)
@@ -132,19 +164,32 @@ def get_master_nonmaster_sensors(data_path: str, sensor_names: list):
         for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
+        tcol = f'Shimmer_{sensor}_TimestampSync_Unix_CAL'
+        if tcol not in df.columns:
+            raise KeyError(
+                f"Expected timestamp column '{tcol}' not found in {csv_file}. "
+                "Export format may have changed."
+            )
+
+        # fail loudly if timestamps contain NaNs
+        if df[tcol].isna().any():
+            raise ValueError(
+                f"Timestamp column '{tcol}' in {csv_file} contains NaNs. "
+                "This indicates a corrupted or incomplete export and should be fixed manually."
+            )
         # add df to dictionary
         dfs[sensor] = df
 
         # get starting and ending time for sensor
-        starting_time = df.iloc[0][f'Shimmer_{sensor}_TimestampSync_Unix_CAL']
-        ending_time = df.iloc[-1][f'Shimmer_{sensor}_TimestampSync_Unix_CAL']
+        starting_time = float(df.iloc[0][tcol])
+        ending_time = float(df.iloc[-1][tcol])
         
         # keep track of which sensor has the latest starting time and earliest ending time, update if necessary
-        if latest_starting_time == None or starting_time > latest_starting_time:
+        if latest_starting_time is None or starting_time > latest_starting_time:
             latest_starting_time = starting_time
             latest_start_sensor = sensor
         
-        if earliest_ending_time == None or ending_time < earliest_ending_time:
+        if earliest_ending_time is None or ending_time < earliest_ending_time:
             earliest_ending_time = ending_time
             earliest_end_sensor = sensor
     

@@ -3,7 +3,7 @@ import subprocess
 
 def get_video_length(trial_path: str, video_name: str) -> float:
     """
-    Return video duration in seconds using ffprobe (authoritative).
+    Return video duration in seconds using ffprobe
     Assumes ffprobe is installed and on PATH.
     """
     video_path = os.path.join(trial_path, video_name)

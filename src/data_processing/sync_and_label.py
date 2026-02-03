@@ -15,8 +15,8 @@ def main(participant_id, data_root, sensors_used):
     trimmed_finalized_duration = get_video_length(trial_path, "trimmed_stage2.mp4")
 
     # video should start when event marker goes high, should end when trial finishes
-    print(f"Trimmed Video Length: {trimmed_duration}")
-    print(f"Trimmed Finalized Length: {trimmed_finalized_duration}")
+    print(f"Stage 1 Video Length: {trimmed_duration}")
+    print(f"Stage 2 Video Length: {trimmed_finalized_duration}")
 
     # merge the two data files into one merged file
     merge_and_clean_sensor_data(
