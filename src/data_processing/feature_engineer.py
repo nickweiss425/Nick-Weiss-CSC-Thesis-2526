@@ -153,53 +153,70 @@ def add_gyro_features(df, sensor_ids, fs, interp_limit=10):
 # Main
 # =====================
 
-def main(data_root):
-    sensor_ids = ["A5F2", "A19E"] 
+def process_participant(pdir: str, pid: str, sensor_ids: list[str]):
+    """
+    Run feature engineering for a single participant directory.
+    Writes {pdir}/engineered.csv if {pdir}/labeled.csv exists.
+    """
+    in_csv = os.path.join(pdir, "labeled.csv")
+    out_csv = os.path.join(pdir, "engineered.csv")
 
-    for pid in sorted(os.listdir(data_root)):
-        pdir = os.path.join(data_root, pid)
-        if not os.path.isdir(pdir):
-            continue
+    if not os.path.exists(in_csv):
+        print(f"[SKIP] {pid}: labeled.csv not found")
+        return
 
-        in_csv = os.path.join(pdir, "labeled.csv")
-        out_csv = os.path.join(pdir, "engineered.csv")
+    df = pd.read_csv(in_csv)
 
-        if not os.path.exists(in_csv):
-            print(f"[SKIP] {pid}: labeled.csv not found")
-            continue
+    if "Event_Marker" in df.columns:
+        df = df.drop(columns=["Event_Marker"])
 
-        df = pd.read_csv(in_csv)
+    fs = estimate_fs_from_time(df)
+    rep = dropout_report(df)
 
-        if "Event_Marker" in df.columns:
-            df = df.drop(columns=["Event_Marker"])
+    print(
+        f"[INFO] {pid}: fs≈{fs:.2f} Hz | "
+        f"median_dt={rep['median_dt']:.6f}s | "
+        f"gap_frac>2x={rep['gap_frac_gt2x']:.2%}"
+    )
 
-        fs = estimate_fs_from_time(df)
-        rep = dropout_report(df)
+    df["participant_id"] = pid
 
-        print(
-            f"[INFO] {pid}: fs≈{fs:.2f} Hz | "
-            f"median_dt={rep['median_dt']:.6f}s | "
-            f"gap_frac>2x={rep['gap_frac_gt2x']:.2%}"
-        )
+    df = add_emg_features(df, sensor_ids, fs)
+    df = add_accel_features(df, sensor_ids, fs)
+    df = add_gyro_features(df, sensor_ids, fs)
 
-        df["participant_id"] = pid
-
-        df = add_emg_features(df, sensor_ids, fs)
-        df = add_accel_features(df, sensor_ids, fs)
-        df = add_gyro_features(df, sensor_ids, fs)
-
-        # keep only engineered + metadata
-        keep_cols = ["Time (s)", "Primitive", "participant_id"]
-        keep_cols += [c for c in df.columns if any(
+    # keep only engineered + metadata
+    keep_cols = ["Time (s)", "Primitive", "participant_id"]
+    keep_cols += [
+        c for c in df.columns
+        if any(
             c.endswith(suf) for suf in (
                 "_FILTERED", "_ENV",
                 "_DENOISED", "_DYN",
                 "_AccelMag_DYN", "_GyroMag_DYN"
             )
-        )]
+        )
+    ]
 
-        df[keep_cols].to_csv(out_csv, index=False)
-        print(f"[DONE] {pid}: wrote engineered.csv ({len(keep_cols)} cols)")
+    df[keep_cols].to_csv(out_csv, index=False)
+    print(f"[DONE] {pid}: wrote engineered.csv ({len(keep_cols)} cols)")
+
+
+def main(data_root: str, participant: str | None, sensor_ids: list[str]):
+    # Single-participant mode
+    if participant is not None:
+        pdir = os.path.join(data_root, participant)
+        if not os.path.isdir(pdir):
+            raise FileNotFoundError(f"Participant folder not found: {pdir}")
+        process_participant(pdir, participant, sensor_ids)
+        return
+
+    # Batch mode (default)
+    for pid in sorted(os.listdir(data_root)):
+        pdir = os.path.join(data_root, pid)
+        if not os.path.isdir(pdir):
+            continue
+        process_participant(pdir, pid, sensor_ids)
 
     print("All participants processed.")
 
@@ -207,5 +224,18 @@ def main(data_root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, required=True)
+    parser.add_argument(
+        "--participant",
+        type=str,
+        default=None,
+        help="Optional participant ID (e.g., P32). If omitted, processes all participants.",
+    )
+    parser.add_argument(
+        "--sensors",
+        nargs="+",
+        default=["A5F2", "A19E"],
+        help="Sensor IDs to engineer (e.g., A5F2 A19E).",
+    )
     args = parser.parse_args()
-    main(args.data_root)
+
+    main(args.data_root, args.participant, args.sensors)
