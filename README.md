@@ -42,7 +42,8 @@ This step produces `labeled.csv` for a given participant. It is typically run pe
 - `labeled.csv` (continuous, time-aligned, labeled sensor data)
 
 **Example**
-   python sync_and_label.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --participant P32 --sensors A5F2 A19E
+    python run_prewindow_pipeline.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --participant P32 --sensors A5F2 A19E
+
 
 ---
 
