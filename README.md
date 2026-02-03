@@ -31,7 +31,7 @@ For each participant, the pre-windowing pipeline consists of:
 This step produces `labeled.csv` for a given participant. It is typically run per participant after labeling is completed in Label Studio.
 
 **Script**
-- `sync_and_label.py`
+- `sync_and_label.py` (or equivalent step-1 entry point)
 
 **Input**
 - Raw Shimmer CSV files
@@ -42,8 +42,7 @@ This step produces `labeled.csv` for a given participant. It is typically run pe
 - `labeled.csv` (continuous, time-aligned, labeled sensor data)
 
 **Example**
-    python run_prewindow_pipeline.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --participant P32 --sensors A5F2 A19E
-
+    python sync_and_label.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --participant P32 --sensors A5F2 A19E
 
 ---
 
@@ -57,13 +56,10 @@ This script supports single-participant and batch operation.
 - `check_missing_labels.py`
 
 ### Single Participant
-    python check_missing_labels.py \
-      --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" \
-      --participant P32
+    python check_missing_labels.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --participant P32
 
 ### Batch (All Participants)
-    python check_missing_labels.py \
-      --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data"
+    python check_missing_labels.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data"
 
 **Output**
 - Console warnings indicating:
@@ -97,14 +93,10 @@ This script supports single-participant and batch operation.
 - `engineered.csv`
 
 ### Single Participant
-    python feature_engineer.py \
-      --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" \
-      --participant P32 \
-      --sensors A5F2 A19E
+    python feature_engineer.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --participant P32 --sensors A5F2 A19E
 
 ### Batch (All Participants)
-    python feature_engineer.py \
-      --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data"
+    python feature_engineer.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data"
 
 ---
 
@@ -122,10 +114,7 @@ This is the recommended entry point once labeling is complete.
 - `run_prewindow_pipeline.py`
 
 **Example**
-    python run_prewindow_pipeline.py \
-      --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" \
-      --participant P32 \
-      --sensors A5F2 A19E
+    python run_prewindow_pipeline.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --participant P32 --sensors A5F2 A19E
 
 The wrapper halts if any step fails, ensuring that feature engineering is only applied to valid, labeled data.
 
