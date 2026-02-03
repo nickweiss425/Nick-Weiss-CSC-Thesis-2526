@@ -6,7 +6,7 @@ import os
 import cv2
 
 def main():
-    participant_id = "P32_V2"
+    participant_id = "P32"
 
     # define where data is held and total trimmed video length
     trial_path = os.path.join("C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data/", participant_id)

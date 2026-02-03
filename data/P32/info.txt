@@ -1,4 +1,5 @@
-Hand Dynanometer: 55.8 lbs
-Total Frames: 113111
-Synced Video Length: 942.59 seconds
-Offset After Sync: 90.28 seconds
+Start (Trim 1): 24.64
+End (Trim 1): 1057.71
+
+Start (Trim 2): 91.29
+End(Trim 2): 1033.70
