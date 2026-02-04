@@ -249,3 +249,143 @@ Confirm that:
 - The total frame count displayed in Label Studio matches the frame count reported by `ffprobe` (±1 frame).
 
 Once this check passes, the video is considered safe for frame-accurate labeling and downstream alignment with sensor data.
+
+
+
+
+# Windowing and Dataset Construction
+
+This stage converts continuous, feature-engineered sensor data into fixed-length, labeled windows suitable for machine learning. The procedure also defines participant-level train/validation/test splits and applies normalization in a manner that avoids data leakage.
+
+All operations are performed at the **participant level** and use only statistics derived from the training participants for normalization.
+
+---
+
+## Overview of Windowing and Dataset Construction
+
+For each fold (defined by a held-out participant), the following steps are performed:
+
+1. **Determine window parameters**
+   - Estimate a common sampling frequency across participants
+   - Convert window duration and stride from seconds to samples
+
+2. **Define participant splits**
+   - Leave-one-participant-out (LOPO) testing
+   - One participant from the training pool used for validation
+
+3. **Apply EMG amplitude normalization (p95)**
+   - Compute per-participant EMG envelope scaling from training data only
+   - Normalize continuous data prior to windowing
+
+4. **Window the normalized time series**
+   - Fixed-length, overlapping windows
+   - One label assigned per window using the center sample
+
+5. **Assemble datasets and apply global standardization**
+   - Concatenate windows across participants
+   - Fit a StandardScaler on training data only
+
+---
+
+## Step 1: Sampling Rate Estimation and Window Parameters
+
+Each participant’s sampling rate is estimated from the `Time (s)` column in `engineered.csv` by computing the median inter-sample interval. A single global sampling rate (`fs_used`) is then defined as the **median across participants**.
+
+Window parameters are specified in seconds and converted to samples:
+
+- `win = round(win_s × fs_used)`
+- `stride = round(stride_s × fs_used)`
+
+Typical values:
+- `win_s = 1.0` s
+- `stride_s = 0.05` s
+
+---
+
+## Step 2: Participant-Level Dataset Split (LOPO)
+
+Dataset construction follows a **leave-one-participant-out (LOPO)** strategy:
+
+- **Test set**: one held-out participant (`--held_out`)
+- **Training pool**: all remaining participants
+- **Validation set**: one participant selected from the training pool
+- **Training set**: remaining participants after removing validation
+
+This ensures that all windows from a participant belong to exactly one split.
+
+---
+
+## Step 3: EMG Robust Normalization (p95 Scaling)
+
+To reduce between-subject EMG amplitude variability while avoiding test leakage, EMG normalization is performed **before windowing** using participant-level statistics.
+
+### Per-Participant p95 Computation
+For each training participant:
+- EMG envelope channels (`*_EMG*_ENV`) are extracted
+- Rows with `Primitive == "Unknown"` are excluded
+- The 95th percentile (p95) is computed per EMG channel
+
+### Scaling Strategy
+- Training and validation participants are normalized using their **own** p95 values
+- The held-out test participant is normalized using the **median p95 across training participants**
+
+This approach ensures that no information from the held-out participant influences normalization statistics.
+
+---
+
+## Step 4: Windowing Procedure
+
+After EMG normalization, each participant’s time series is segmented into overlapping windows.
+
+For each window:
+- Length: `win` samples
+- Step size: `stride` samples
+- Feature tensor shape: `(win, num_features)`
+- Label assignment: the **center sample’s** `Primitive` label
+
+Windows whose center label is `"Unknown"` are discarded.
+
+This results in:
+- `X`: shape `(num_windows, win, num_features)`
+- `y`: shape `(num_windows,)` (string labels)
+
+Windowing is performed independently for each participant before concatenation.
+
+---
+
+## Step 5: Dataset Assembly and Global Standardization
+
+Windowed data are concatenated across participants to form the final datasets:
+
+- `X_train`, `y_train`
+- `X_val`, `y_val`
+- `X_test`, `y_test`
+
+A `StandardScaler` is then:
+- fit **only** on the training windows (flattened across time)
+- applied to training, validation, and test sets
+
+Primitive labels are mapped to integer class indices using a fixed, sorted class list shared across all splits.
+
+---
+
+## Outputs (Per Fold)
+
+Each fold is saved to: runs/prep/fold_<HELD_OUT_PID>/
+
+
+Contents include:
+- `X_train.npy`, `y_train.npy`
+- `X_val.npy`, `y_val.npy`
+- `X_test.npy`, `y_test.npy`
+- `scaler.joblib`
+- EMG normalization artifacts (`p95_train_by_pid.npy`, `p95_median_train.npy`)
+- `meta.json` containing split details, window parameters, feature lists, and normalization descriptions
+
+---
+
+## Example Command
+
+    python prepare_fold.py --data_root "C:/Users/nicho/Desktop/Nick-Weiss-CSC-Thesis-2526/data" --out_root runs/prep --held_out P32 --win_s 1.0 --stride_s 0.05
+
+This command generates a complete LOPO fold with participant `P32` held out for testing.
