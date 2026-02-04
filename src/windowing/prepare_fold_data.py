@@ -37,14 +37,12 @@ def estimate_fs(df):
 
 # ---------- Feature selection ----------
 def get_feature_cols(df):
-    # engineered columns only: everything numeric except Time/Primitive/participant_id
     excl = {TIME_COL, LABEL_COL, PID_COL}
     cols = [c for c in df.columns if c not in excl]
     cols = [c for c in cols if np.issubdtype(df[c].dtype, np.number)]
     return sorted(cols)
 
 def get_emg_env_cols(feature_cols):
-    # your engineered naming: "*_EMG*_ENV"
     return [c for c in feature_cols if ("_EMG" in c and c.endswith("_ENV"))]
 
 # ---------- Windowing ----------
@@ -68,29 +66,40 @@ def make_windows(df, feature_cols, win, stride, drop_label="Unknown"):
     return np.stack(X_list), np.array(y_list, dtype=object)
 
 # ---------- Normalization ----------
-def compute_p95_per_pid(windows_by_pid, emg_idxs, pids, min_p95=1e-6):
-    # returns dict pid -> p95 vector (len = n_emg_channels)
+def compute_p95_from_dfs(dfs, emg_env_cols, pids, drop_label="Unknown", min_p95=1e-6):
+    """
+    Compute per-participant EMG envelope p95 directly from dfs[pid],
+    excluding rows whose label is drop_label.
+    Returns: dict pid -> p95 vector (len = n_emg_env_cols)
+    """
     out = {}
     for pid in pids:
-        X = windows_by_pid[pid]
-        if X.size == 0:
+        df = dfs[pid]
+
+        # exclude Unknown rows
+        mask = df[LABEL_COL].astype(str).to_numpy() != drop_label
+        if not np.any(mask):
             continue
-        emg_flat = X[:, :, emg_idxs].reshape(-1, len(emg_idxs))
-        p95 = np.percentile(emg_flat, 95, axis=0)
-        p95 = np.maximum(p95, min_p95)
-        out[pid] = p95.astype(np.float32)
+
+        emg = df.loc[mask, emg_env_cols].to_numpy(np.float32)  # shape: (N_kept, n_emg)
+        if emg.size == 0:
+            continue
+
+        p95 = np.percentile(emg, 95, axis=0)
+        p95 = np.maximum(p95, min_p95).astype(np.float32)
+        out[pid] = p95
     return out
 
-def apply_p95(X, emg_idxs, p95_vec):
-    if X.size == 0:
-        return X
-    X2 = X.copy()
-    for j, idx in enumerate(emg_idxs):
-        X2[:, :, idx] = X2[:, :, idx] / p95_vec[j]
-    return X2
+def apply_p95_to_df(df, emg_env_cols, p95_vec):
+    """
+    Return a copy of df where EMG envelope columns are divided by p95_vec.
+    """
+    df2 = df.copy()
+    # ensure broadcast works: (N, n_emg) / (n_emg,)
+    df2.loc[:, emg_env_cols] = df2.loc[:, emg_env_cols].to_numpy(np.float32) / p95_vec
+    return df2
 
 def fit_scaler_on_training(X_train):
-    # X_train: (N, W, C)
     flat = X_train.reshape(-1, X_train.shape[-1])
     scaler = StandardScaler()
     scaler.fit(flat)
@@ -121,52 +130,54 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
     pids = list_pids(data_root)
     assert held_out_pid in pids
 
-    # load all dfs into easy to access dictionary
+    # load all dfs
     dfs = {pid: load_engineered(data_root, pid) for pid in pids}
 
-    # determine fs and win/stride in units of # samples
+    # fs and win/stride in samples
     fs_used = float(np.median([estimate_fs(dfs[pid]) for pid in pids]))
     win = int(round(win_s * fs_used))
     stride = int(round(stride_s * fs_used))
 
-    # feature cols based on first participant 
+    # features + EMG envelope columns
     feature_cols = get_feature_cols(dfs[pids[0]])
     emg_env_cols = get_emg_env_cols(feature_cols)
-    emg_idxs = [feature_cols.index(c) for c in emg_env_cols]
-
     class_list = build_class_list(dfs)
 
-    # Split: LOPO with a simple 1-participant val pulled from training set
+    # Split: LOPO + 1 val pid from training pool
     train_pids = [p for p in pids if p != held_out_pid]
     val_pid = train_pids[-1] if len(train_pids) > 1 else train_pids[0]
-    train_for_model = [p for p in train_pids if p != val_pid]
     val_pids = [val_pid]
+    train_for_model = [p for p in train_pids if p != val_pid]
     test_pids = [held_out_pid]
 
-    # window all participants 
-    windows = {}
-    labels = {}
-    for pid in pids:
-        Xw, yw = make_windows(dfs[pid], feature_cols, win, stride)
-        windows[pid], labels[pid] = Xw, yw
+    # --- EMG robust scaling computed before windowing ---
+    # STEP 1: get p95 per training participant from dfs (excluding Unknown rows)
+    p95_by_pid = compute_p95_from_dfs(dfs, emg_env_cols, train_pids, drop_label="Unknown")
 
-    # --- EMG robust scaling ---
-    # 1) p95 per training participant (for training participants only)
-    p95_by_pid = compute_p95_per_pid(windows, emg_idxs, train_pids)
+    # STEP 2: get median p95 across training participants (used for held-out, and as fallback)
+    train_pids_order = [pid for pid in train_pids if pid in p95_by_pid]
+    if len(train_pids_order) == 0:
+        raise RuntimeError("No training participants had any non-Unknown rows for EMG p95 computation.")
 
-    # 2) median p95 across training participants (used for held-out)
-    p95_mat = np.stack([p95_by_pid[pid] for pid in train_pids if pid in p95_by_pid], axis=0)
+    p95_mat = np.stack([p95_by_pid[pid] for pid in train_pids_order], axis=0)
     p95_median = np.median(p95_mat, axis=0).astype(np.float32)
 
-    # 3) apply p95: train participants use own; held-out uses median
+    # STEP 3: normalize dfs per participant (train/val use own when available; held-out uses median)
     def p95_for(pid):
         return p95_by_pid.get(pid, p95_median)
 
-    windows_p95 = {pid: apply_p95(windows[pid], emg_idxs, p95_for(pid)) for pid in pids}
+    dfs_p95 = {pid: apply_p95_to_df(dfs[pid], emg_env_cols, p95_for(pid)) for pid in pids}
+
+    # --- Window all participants AFTER EMG normalization ---
+    windows = {}
+    labels = {}
+    for pid in pids:
+        Xw, yw = make_windows(dfs_p95[pid], feature_cols, win, stride, drop_label="Unknown")
+        windows[pid], labels[pid] = Xw, yw
 
     # --- Build split arrays ---
     def cat(pid_list):
-        X = np.concatenate([windows_p95[p] for p in pid_list], axis=0)
+        X = np.concatenate([windows[p] for p in pid_list], axis=0)
         y = np.concatenate([labels[p] for p in pid_list], axis=0)
         return X, y
 
@@ -201,20 +212,18 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
         "emg_env_cols": emg_env_cols,
         "class_list": class_list,
         "normalization": {
-            "emg_env": "per-training-participant p95; held-out uses median(training p95)",
+            "emg_env": "per-training-participant p95 computed from dfs excluding Unknown rows; held-out uses median(training p95)",
             "global": "StandardScaler fit on training windows after p95 scaling"
         }
     }
     with open(os.path.join(fold_dir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
-    # Save p95 artifacts
-    train_pids_order = [pid for pid in train_pids if pid in p95_by_pid]
+    # save p95 artifacts
     np.save(os.path.join(fold_dir, "p95_train_by_pid.npy"),
             np.stack([p95_by_pid[pid] for pid in train_pids_order], axis=0))
     with open(os.path.join(fold_dir, "train_pids_order.json"), "w") as f:
         json.dump(train_pids_order, f, indent=2)
-
     np.save(os.path.join(fold_dir, "p95_median_train.npy"), p95_median)
 
     # Save scaler + arrays
