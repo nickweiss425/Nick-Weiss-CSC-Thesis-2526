@@ -143,9 +143,12 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
     emg_env_cols = get_emg_env_cols(feature_cols)
     class_list = build_class_list(dfs)
 
-    # Split: LOPO + 1 val pid from training pool
+    # split: LOPO + 1 val pid from training pool
     train_pids = [p for p in pids if p != held_out_pid]
-    val_pid = train_pids[-1] if len(train_pids) > 1 else train_pids[0]
+    # rotate val deterministically based on which fold we’re on
+    val_idx = pids.index(held_out_pid) % len(train_pids)
+    val_pid = train_pids[val_idx]
+    print(f"[INFO] Participant {val_pid} being used for validation for held out participant split {held_out_pid}")
     val_pids = [val_pid]
     train_for_model = [p for p in train_pids if p != val_pid]
     test_pids = [held_out_pid]
@@ -238,16 +241,47 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
     print(f"[DONE] fold {held_out_pid}: "
           f"train {X_train.shape}, val {X_val.shape}, test {X_test.shape} saved to {fold_dir}")
 
+def prepare_all_lopo(data_root, out_root, win_s=1.0, stride_s=0.05, skip_existing=True):
+    pids = list_pids(data_root)
+    print(f"[INFO] Found {len(pids)} participants: {pids}")
+
+    for held_out_pid in pids:
+        fold_dir = os.path.join(out_root, f"fold_{held_out_pid}")
+        if skip_existing and os.path.exists(os.path.join(fold_dir, "meta.json")):
+            print(f"[SKIP] fold {held_out_pid} already exists at {fold_dir}")
+            continue
+
+        prepare_fold(
+            data_root=data_root,
+            out_root=out_root,
+            held_out_pid=held_out_pid,
+            win_s=win_s,
+            stride_s=stride_s,
+        )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", required=True)
     ap.add_argument("--out_root", default="runs/prep")
-    ap.add_argument("--held_out", required=True, help="Participant ID to hold out, e.g., P40")
+
+    # either specify one held-out pid or run all
+    ap.add_argument("--held_out", default=None, help="Participant ID to hold out, e.g., P40")
+    ap.add_argument("--all_lopo", action="store_true", help="Run LOPO over all participants")
+
     ap.add_argument("--win_s", type=float, default=1.0)
     ap.add_argument("--stride_s", type=float, default=0.05)
+    ap.add_argument("--skip_existing", action="store_true", help="Skip folds that already exist")
+
     args = ap.parse_args()
 
-    prepare_fold(args.data_root, args.out_root, args.held_out, args.win_s, args.stride_s)
+    if args.all_lopo:
+        prepare_all_lopo(args.data_root, args.out_root, args.win_s, args.stride_s, args.skip_existing)
+    else:
+        if args.held_out is None:
+            raise SystemExit("Provide --held_out PXX or use --all_lopo")
+        prepare_fold(args.data_root, args.out_root, args.held_out, args.win_s, args.stride_s)
+
 
 if __name__ == "__main__":
     main()

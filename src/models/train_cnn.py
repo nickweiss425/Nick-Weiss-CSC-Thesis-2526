@@ -19,6 +19,15 @@ def load_fold(fold_dir: str):
     class_list = meta["class_list"]
     return (X_train, y_train, X_val, y_val, X_test, y_test, class_list, meta)
 
+def list_fold_dirs(folds_root: str):
+    fold_dirs = []
+    for name in sorted(os.listdir(folds_root)):
+        if name.startswith("fold_"):
+            p = os.path.join(folds_root, name)
+            if os.path.isdir(p) and os.path.exists(os.path.join(p, "meta.json")):
+                fold_dirs.append(p)
+    return fold_dirs
+
 
 def make_tf_dataset(X, y, batch_size=256, shuffle=False):
     ds = tf.data.Dataset.from_tensor_slices((X, y))
@@ -88,38 +97,17 @@ def build_cnn(input_shape, num_classes):
     return model
 
 
-# ---------- Main ----------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--fold_dir", type=str, default="runs/prep/fold_P22")
-    ap.add_argument("--out_dir", type=str, default="runs/models/cnn_fold_P22")
-    ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--batch_size", type=int, default=256)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--use_class_weights", action="store_true")
-    ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
+def train_one_fold(fold_dir: str, out_dir: str, args):
+    os.makedirs(out_dir, exist_ok=True)
 
-    tf.random.set_seed(args.seed)
-    np.random.seed(args.seed)
-
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    X_train, y_train, X_val, y_val, X_test, y_test, class_list, meta = load_fold(args.fold_dir)
+    X_train, y_train, X_val, y_val, X_test, y_test, class_list, meta = load_fold(fold_dir)
     num_classes = len(class_list)
-
-    print("[INFO] Loaded fold:", args.fold_dir)
-    print("  Train:", X_train.shape, y_train.shape)
-    print("  Val:  ", X_val.shape, y_val.shape)
-    print("  Test: ", X_test.shape, y_test.shape)
-    print("  Classes:", class_list)
 
     train_ds = make_tf_dataset(X_train, y_train, batch_size=args.batch_size, shuffle=True)
     val_ds   = make_tf_dataset(X_val, y_val, batch_size=args.batch_size, shuffle=False)
     test_ds  = make_tf_dataset(X_test, y_test, batch_size=args.batch_size, shuffle=False)
 
     model = build_cnn(input_shape=X_train.shape[1:], num_classes=num_classes)
-
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=args.lr),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
@@ -128,7 +116,7 @@ def main():
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(args.out_dir, "best.keras"),
+            filepath=os.path.join(out_dir, "best.keras"),
             monitor="val_acc",
             save_best_only=True,
             mode="max"
@@ -139,13 +127,12 @@ def main():
             mode="max",
             restore_best_weights=True
         ),
-        tf.keras.callbacks.CSVLogger(os.path.join(args.out_dir, "training_log.csv"))
+        tf.keras.callbacks.CSVLogger(os.path.join(out_dir, "training_log.csv"))
     ]
 
     class_weight = None
     if args.use_class_weights:
         class_weight = compute_class_weights(y_train, num_classes)
-        print("[INFO] Using class weights:", class_weight)
 
     history = model.fit(
         train_ds,
@@ -156,30 +143,22 @@ def main():
         verbose=1
     )
 
-    # Evaluate on test
+    # Evaluate + metrics
     test_loss, test_acc = model.evaluate(test_ds, verbose=0)
-
-    # Predictions for metrics
     y_prob = model.predict(test_ds, verbose=0)
     y_pred = np.argmax(y_prob, axis=1)
 
     cm = confusion_matrix_np(y_test, y_pred, num_classes)
     macro_f1, f1_per_class = macro_f1_from_cm(cm)
 
-    print("\n[TEST RESULTS]")
-    print(f"  acc      = {test_acc:.4f}")
-    print(f"  macro_f1 = {macro_f1:.4f}")
-    print("\nConfusion matrix (rows=true, cols=pred):")
-    print(cm)
-
-    # Save results
     results = {
-        "fold_dir": args.fold_dir,
-        "out_dir": args.out_dir,
+        "fold_dir": fold_dir,
+        "out_dir": out_dir,
+        "held_out_pid": meta.get("held_out_pid", None),
         "classes": class_list,
         "test_acc": float(test_acc),
         "test_macro_f1": float(macro_f1),
-        "f1_per_class": {class_list[i]: f1_per_class[i] for i in range(num_classes)},
+        "f1_per_class": {class_list[i]: float(f1_per_class[i]) for i in range(num_classes)},
         "confusion_matrix": cm.tolist(),
         "config": {
             "epochs": args.epochs,
@@ -190,17 +169,112 @@ def main():
         }
     }
 
-    with open(os.path.join(args.out_dir, "results.json"), "w") as f:
+    with open(os.path.join(out_dir, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    # Save final model too (in addition to best.keras checkpoint)
-    model.save(os.path.join(args.out_dir, "final.keras"))
+    model.save(os.path.join(out_dir, "final.keras"))
+    return results
 
-    print(f"\n[SAVED] {args.out_dir}")
-    print("  - best.keras")
-    print("  - final.keras")
-    print("  - results.json")
-    print("  - training_log.csv")
+
+def aggregate_results(all_results):
+    accs = np.array([r["test_acc"] for r in all_results], dtype=np.float32)
+    f1s  = np.array([r["test_macro_f1"] for r in all_results], dtype=np.float32)
+
+    # sum confusion matrices (assumes same class order across folds)
+    cms = [np.array(r["confusion_matrix"], dtype=np.int64) for r in all_results]
+    cm_sum = np.sum(cms, axis=0)
+
+    summary = {
+        "n_folds": int(len(all_results)),
+        "test_acc_mean": float(accs.mean()),
+        "test_acc_std": float(accs.std(ddof=1)) if len(accs) > 1 else 0.0,
+        "test_macro_f1_mean": float(f1s.mean()),
+        "test_macro_f1_std": float(f1s.std(ddof=1)) if len(f1s) > 1 else 0.0,
+        "confusion_matrix_sum": cm_sum.tolist(),
+        "per_fold": [
+            {
+                "held_out_pid": r.get("held_out_pid"),
+                "test_acc": r["test_acc"],
+                "test_macro_f1": r["test_macro_f1"],
+                "out_dir": r["out_dir"],
+            } for r in all_results
+        ],
+    }
+    return summary
+
+
+# ---------- Main ----------
+def main():
+    ap = argparse.ArgumentParser()
+
+    # --- Single-fold vs LOPO-all ---
+    ap.add_argument("--fold_dir", type=str, default=None,
+                    help="Path to a single fold dir, e.g., runs/prep/fold_P22")
+    ap.add_argument("--out_dir", type=str, default=None,
+                    help="Output dir for a single-fold run, e.g., runs/models/cnn_fold_P22")
+
+    ap.add_argument("--all_folds", action="store_true",
+                    help="Train/eval on every fold_* directory under --folds_root")
+    ap.add_argument("--folds_root", type=str, default="runs/prep",
+                    help="Directory containing fold_* folders")
+    ap.add_argument("--out_root", type=str, default="runs/models/cnn_lopo",
+                    help="Root output directory for LOPO runs (one subdir per fold)")
+
+    # --- Training hyperparams ---
+    ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--use_class_weights", action="store_true")
+    ap.add_argument("--seed", type=int, default=42)
+
+    args = ap.parse_args()
+
+    tf.random.set_seed(args.seed)
+    np.random.seed(args.seed)
+
+    # ---------------------------
+    # LOPO: train on all folds
+    # ---------------------------
+    if args.all_folds:
+        fold_dirs = list_fold_dirs(args.folds_root)
+        if len(fold_dirs) == 0:
+            raise SystemExit(f"No fold_* directories found in: {args.folds_root}")
+
+        os.makedirs(args.out_root, exist_ok=True)
+
+        all_results = []
+        for fold_dir in fold_dirs:
+            held_out = os.path.basename(fold_dir).replace("fold_", "")
+            out_dir = os.path.join(args.out_root, f"cnn_fold_{held_out}")
+
+            print(f"\n[RUN] {fold_dir} -> {out_dir}")
+            r = train_one_fold(fold_dir, out_dir, args)
+            all_results.append(r)
+
+            # helps prevent TF memory buildup across folds
+            tf.keras.backend.clear_session()
+
+        summary = aggregate_results(all_results)
+        with open(os.path.join(args.out_root, "summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+
+        print("\n[LOPO SUMMARY]")
+        print(f"  folds: {summary['n_folds']}")
+        print(f"  acc:   {summary['test_acc_mean']:.4f} ± {summary['test_acc_std']:.4f}")
+        print(f"  f1:    {summary['test_macro_f1_mean']:.4f} ± {summary['test_macro_f1_std']:.4f}")
+        print(f"\n[SAVED] {os.path.join(args.out_root, 'summary.json')}")
+        return
+
+    # ---------------------------
+    # Single-fold: train once
+    # ---------------------------
+    if args.fold_dir is None:
+        raise SystemExit("Provide --fold_dir for a single-fold run, or use --all_folds.")
+    if args.out_dir is None:
+        raise SystemExit("Provide --out_dir for a single-fold run.")
+
+    train_one_fold(args.fold_dir, args.out_dir, args)
+
 
 
 if __name__ == "__main__":

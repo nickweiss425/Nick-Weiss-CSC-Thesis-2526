@@ -1,6 +1,6 @@
 import numpy as np, json, os
 
-fold = "runs/prep/fold_P22"
+fold = "../../runs/prep/fold_P32"
 Xtr = np.load(os.path.join(fold, "X_train.npy"))
 ytr = np.load(os.path.join(fold, "y_train.npy"))
 meta = json.load(open(os.path.join(fold, "meta.json")))
