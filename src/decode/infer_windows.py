@@ -22,8 +22,6 @@ def make_windows(df, feature_cols, win, stride, drop_label="Unknown"):
     # loop through dataset and make windows
     for start in range(0, n - win + 1, stride):
         center = start + win // 2
-
-
         center_label = y[center]
         if center_label == drop_label:
             continue
