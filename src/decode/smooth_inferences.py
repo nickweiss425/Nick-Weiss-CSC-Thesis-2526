@@ -6,7 +6,7 @@ import joblib
 
 def main():
     """
-    Step 3: Probability Smoothing (Exponential Moving Average)
+    Probability Smoothing (Exponential Moving Average)
 
     Purpose
     -------
@@ -79,9 +79,9 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--pid", required=True, help="Held-out participant ID, e.g., P40")
-    ap.add_argument("--predictions_root", default="decoded/windows/")
+    ap.add_argument("--predictions_root", default="../../decoded/cnn_decoded/P32")
     ap.add_argument("--alpha", type=float, default=0.6)
-    ap.add_argument("--out_dir", default=os.path.join("runs", "decoded"))
+    ap.add_argument("--out_dir", default="../../decoded/cnn_decoded/P32")
 
     args = ap.parse_args()
 

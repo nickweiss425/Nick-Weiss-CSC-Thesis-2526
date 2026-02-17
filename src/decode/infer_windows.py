@@ -45,10 +45,10 @@ def y_to_int(y_str, class_list):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pid", required=True, help="Held-out participant ID, e.g., P40")
-    ap.add_argument("--data_root", default="data")
-    ap.add_argument("--folds_root", default=os.path.join("runs", "prep"))
-    ap.add_argument("--models_root", default=os.path.join("runs", "models", "cnn_lopo"))
-    ap.add_argument("--out_dir", default=os.path.join("runs", "decoded"))
+    ap.add_argument("--data_root", default="../../data/")
+    ap.add_argument("--folds_root", default="../../runs/folds/")
+    ap.add_argument("--models_root", default="../../runs/training_results/cnn_lopo/")
+    ap.add_argument("--out_dir", default="../../decoded/")
     ap.add_argument("--drop_label", default="Unknown")
     args = ap.parse_args()
 
