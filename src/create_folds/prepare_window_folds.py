@@ -263,7 +263,7 @@ def prepare_all_lopo(data_root, out_root, win_s=1.0, stride_s=0.05, skip_existin
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", required=True)
-    ap.add_argument("--out_root", default="runs/prep")
+    ap.add_argument("--out_root", default="../../runs/window_folds/")
 
     # either specify one held-out pid or run all
     ap.add_argument("--held_out", default=None, help="Participant ID to hold out, e.g., P40")
