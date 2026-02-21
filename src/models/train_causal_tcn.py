@@ -1,23 +1,26 @@
-# train_tcn_causal.py
 """
-Causal TCN trainer (full-sequence ready, but works with windowed folds too).
+Causal Dense TCN trainer that consumes FULL-SEQUENCE folds saved as NumPy object arrays
+(from prepare_fullseq_folds.py), intended for batch_size=1.
 
-This follows the structure of your CNN trainer:
-- load_fold() reads X_train/y_train/X_val/y_val/X_test/y_test + meta.json
-- supports single-fold and LOPO-all
-- supports class weights (for sparse labels)
-- writes best.keras, final.keras, results.json, summary.json
+Expected fold_dir contents:
+  X_train.npy, y_train.npy, mask_train.npy
+  X_val.npy,   y_val.npy,   mask_val.npy
+  X_test.npy,  y_test.npy,  mask_test.npy
+  meta.json (with class_list)
 
-IMPORTANT:
-- This script supports TWO label formats:
-  (A) Window classification: y has shape (N,)  -> model output (N, K)
-  (B) Dense per-timestep:   y has shape (N, T) -> model output (N, T, K)
-  It auto-detects based on y.ndim.
+Where each X_*.npy is an object array of length N_seqs.
+Each element is:
+  X[i]: (T_i, C) float32
+  y[i]: (T_i,) int32 with Unknown = -1
+  mask[i]: (T_i,) float32 with supervised=1, Unknown=0
 
-For full-sequence training with variable trial lengths:
-- easiest is batch_size=1 and store each trial as one example (N = num_trials)
-- if you pad within a batch, you must also provide sample weights/mask;
-  this script keeps it simple and assumes either fixed-length per batch or batch_size=1.
+Training uses sample_weight=mask so Unknown timesteps do not contribute to loss/metrics.
+Because SparseCategoricalCrossentropy cannot accept -1 labels, we replace -1 with 0
+ONLY for computation; those positions are weight=0 so they are ignored.
+
+Outputs:
+  best.keras, final.keras, training_log.csv, results.json
+  If --all_folds: summary.json in out_root
 """
 
 import os
@@ -27,21 +30,29 @@ import numpy as np
 import tensorflow as tf
 
 # -----------------------
-# Utils (same as your CNN)
+# IO / fold loading
 # -----------------------
-def load_fold(fold_dir: str):
-    X_train = np.load(os.path.join(fold_dir, "X_train.npy"))
-    y_train = np.load(os.path.join(fold_dir, "y_train.npy"))
-    X_val   = np.load(os.path.join(fold_dir, "X_val.npy"))
-    y_val   = np.load(os.path.join(fold_dir, "y_val.npy"))
-    X_test  = np.load(os.path.join(fold_dir, "X_test.npy"))
-    y_test  = np.load(os.path.join(fold_dir, "y_test.npy"))
+def load_fullseq_fold(fold_dir: str):
+    def load_obj(name):
+        return np.load(os.path.join(fold_dir, name), allow_pickle=True)
+
+    X_train = load_obj("X_train.npy")
+    y_train = load_obj("y_train.npy")
+    m_train = load_obj("mask_train.npy")
+
+    X_val = load_obj("X_val.npy")
+    y_val = load_obj("y_val.npy")
+    m_val = load_obj("mask_val.npy")
+
+    X_test = load_obj("X_test.npy")
+    y_test = load_obj("y_test.npy")
+    m_test = load_obj("mask_test.npy")
 
     with open(os.path.join(fold_dir, "meta.json"), "r") as f:
         meta = json.load(f)
 
     class_list = meta["class_list"]
-    return (X_train, y_train, X_val, y_val, X_test, y_test, class_list, meta)
+    return (X_train, y_train, m_train, X_val, y_val, m_val, X_test, y_test, m_test, class_list, meta)
 
 
 def list_fold_dirs(folds_root: str):
@@ -54,32 +65,9 @@ def list_fold_dirs(folds_root: str):
     return fold_dirs
 
 
-def make_tf_dataset(X, y, batch_size=256, shuffle=False):
-    ds = tf.data.Dataset.from_tensor_slices((X, y))
-    if shuffle:
-        ds = ds.shuffle(buffer_size=min(len(y), 20000), reshuffle_each_iteration=True)
-    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    return ds
-
-
-def compute_class_weights(y: np.ndarray, num_classes: int):
-    """
-    For sparse integer labels.
-
-    If y is (N,), weights are computed directly.
-    If y is (N,T), weights are computed over all timesteps.
-    """
-    if y.ndim == 2:
-        y_flat = y.reshape(-1)
-    else:
-        y_flat = y
-    counts = np.bincount(y_flat, minlength=num_classes).astype(np.float32)
-    total = counts.sum()
-    counts = np.maximum(counts, 1.0)
-    weights = total / (num_classes * counts)
-    return {i: float(weights[i]) for i in range(num_classes)}
-
-
+# -----------------------
+# Metrics helpers
+# -----------------------
 def confusion_matrix_np(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int):
     cm = np.zeros((num_classes, num_classes), dtype=np.int64)
     for t, p in zip(y_true, y_pred):
@@ -100,8 +88,75 @@ def macro_f1_from_cm(cm: np.ndarray):
     return float(np.mean(f1s)), [float(x) for x in f1s]
 
 
+def masked_time_weighted_accuracy(y_true_list, y_pred_list, mask_list):
+    """
+    y_true_list/y_pred_list/mask_list are lists (length N_seq) of arrays (T_i,)
+    Computes accuracy only where mask==1.
+    """
+    correct = 0.0
+    total = 0.0
+    for yt, yp, m in zip(y_true_list, y_pred_list, mask_list):
+        keep = (m > 0.5)
+        if not np.any(keep):
+            continue
+        correct += float(np.sum((yt[keep] == yp[keep]).astype(np.float32)))
+        total += float(np.sum(keep.astype(np.float32)))
+    return float(correct / total) if total > 0 else 0.0
+
+
 # -----------------------
-# TCN building blocks
+# tf.data for batch_size=1 full sequences
+# -----------------------
+def make_fullseq_dataset(X_obj, y_obj, m_obj, shuffle: bool, seed: int):
+    """
+    Infinite dataset yielding (X, y_fixed, sample_weight) with shapes:
+      X: (T_i, C)
+      y_fixed: (T_i,)
+      sample_weight: (T_i,)
+
+    Because this generator is infinite, you MUST pass steps_per_epoch
+    (and validation_steps / test_steps) to fit/evaluate.
+    """
+    n = len(X_obj)
+    indices = np.arange(n, dtype=np.int32)
+    rng = np.random.RandomState(seed)
+
+    def gen():
+        while True:
+            idxs = indices.copy()
+            if shuffle:
+                rng.shuffle(idxs)
+
+            for i in idxs:
+                X = X_obj[i].astype(np.float32)
+                y = y_obj[i].astype(np.int32)
+                m = m_obj[i].astype(np.float32)
+
+                # Safety checks
+                if X.ndim != 2:
+                    raise ValueError(f"X[{i}] expected shape (T,C), got {X.shape}")
+                if y.ndim != 1 or m.ndim != 1:
+                    raise ValueError(f"y/m[{i}] expected shape (T,), got y={y.shape}, m={m.shape}")
+                if X.shape[0] != y.shape[0] or y.shape[0] != m.shape[0]:
+                    raise ValueError(f"Length mismatch at i={i}: X={X.shape}, y={y.shape}, m={m.shape}")
+
+                # Replace -1 with 0 (ignored by weights where mask==0)
+                y_fixed = np.where(y < 0, 0, y).astype(np.int32)
+
+                yield (X, y_fixed, m)
+
+    output_signature = (
+        tf.TensorSpec(shape=(None, None), dtype=tf.float32),  # (T, C) with variable T and unknown C
+        tf.TensorSpec(shape=(None,), dtype=tf.int32),         # (T,)
+        tf.TensorSpec(shape=(None,), dtype=tf.float32),       # (T,)
+    )
+
+    ds = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
+    ds = ds.batch(1).prefetch(tf.data.AUTOTUNE)
+    return ds
+
+# -----------------------
+# TCN model (causal dense)
 # -----------------------
 def tcn_residual_block(
     x,
@@ -109,15 +164,23 @@ def tcn_residual_block(
     kernel_size: int,
     dilation: int,
     dropout: float,
+    use_layernorm: bool,
     name: str,
 ):
     """
-    A standard TCN residual block:
-      Conv1D (causal, dilated) -> BN -> ReLU -> Dropout
-      Conv1D (causal, dilated) -> BN -> ReLU -> Dropout
-      Residual connection (1x1 conv if needed)
+    Residual TCN block:
+      Conv1D(causal, dilated) -> Norm -> ReLU -> Dropout
+      Conv1D(causal, dilated) -> Norm -> ReLU -> Dropout
+      Residual add (+ 1x1 projection if needed)
+    For batch_size=1, LayerNorm is often more stable than BatchNorm.
     """
-    in_channels = x.shape[-1]
+    in_ch = x.shape[-1]
+
+    def norm_layer(nm):
+        if use_layernorm:
+            return tf.keras.layers.LayerNormalization(name=nm)
+        else:
+            return tf.keras.layers.BatchNormalization(name=nm)
 
     y = tf.keras.layers.Conv1D(
         filters,
@@ -127,7 +190,7 @@ def tcn_residual_block(
         use_bias=False,
         name=f"{name}_conv1",
     )(x)
-    y = tf.keras.layers.BatchNormalization(name=f"{name}_bn1")(y)
+    y = norm_layer(f"{name}_norm1")(y)
     y = tf.keras.layers.Activation("relu", name=f"{name}_relu1")(y)
     y = tf.keras.layers.Dropout(dropout, name=f"{name}_drop1")(y)
 
@@ -139,15 +202,13 @@ def tcn_residual_block(
         use_bias=False,
         name=f"{name}_conv2",
     )(y)
-    y = tf.keras.layers.BatchNormalization(name=f"{name}_bn2")(y)
+    y = norm_layer(f"{name}_norm2")(y)
     y = tf.keras.layers.Activation("relu", name=f"{name}_relu2")(y)
     y = tf.keras.layers.Dropout(dropout, name=f"{name}_drop2")(y)
 
-    if in_channels != filters:
-        shortcut = tf.keras.layers.Conv1D(
-            filters, kernel_size=1, padding="same", use_bias=False, name=f"{name}_proj"
-        )(x)
-        shortcut = tf.keras.layers.BatchNormalization(name=f"{name}_proj_bn")(shortcut)
+    if in_ch != filters:
+        shortcut = tf.keras.layers.Conv1D(filters, 1, padding="same", use_bias=False, name=f"{name}_proj")(x)
+        shortcut = norm_layer(f"{name}_proj_norm")(shortcut)
     else:
         shortcut = x
 
@@ -156,26 +217,21 @@ def tcn_residual_block(
     return out
 
 
-def build_tcn(
-    input_shape,
+def build_causal_dense_tcn(
+    num_channels: int,
     num_classes: int,
-    *,
-    filters: int = 64,
-    kernel_size: int = 3,
-    n_blocks: int = 6,
-    dropout: float = 0.2,
-    dense_per_timestep: bool = True,
+    filters: int,
+    kernel_size: int,
+    n_blocks: int,
+    dropout: float,
+    use_layernorm: bool,
 ):
     """
-    If dense_per_timestep=True:
-        Input:  (T, C) -> Output: (T, K) softmax per timestep
-    Else (window classification):
-        Input:  (T, C) -> Output: (K,) softmax for the window
+    Input:  (T, C)
+    Output: (T, K) softmax per timestep
     """
-    inp = tf.keras.Input(shape=input_shape, name="input")  # (T, C)
-
+    inp = tf.keras.Input(shape=(None, num_channels), name="input")  # variable T
     x = inp
-    # Exponential dilations: 1,2,4,8,...
     for i in range(n_blocks):
         d = 2 ** i
         x = tcn_residual_block(
@@ -184,64 +240,59 @@ def build_tcn(
             kernel_size=kernel_size,
             dilation=d,
             dropout=dropout,
+            use_layernorm=use_layernorm,
             name=f"tcn_b{i+1}_d{d}",
         )
 
-    if dense_per_timestep:
-        # 1x1 conv to K classes at each timestep
-        logits = tf.keras.layers.Conv1D(
-            num_classes, kernel_size=1, padding="same", name="logits_1x1"
-        )(x)  # (B, T, K)
-        out = tf.keras.layers.Activation("softmax", name="softmax")(logits)
-    else:
-        # collapse time and classify window
-        x = tf.keras.layers.GlobalAveragePooling1D(name="gap")(x)
-        x = tf.keras.layers.Dense(128, activation="relu", name="fc1")(x)
-        x = tf.keras.layers.Dropout(0.3, name="fc1_drop")(x)
-        out = tf.keras.layers.Dense(num_classes, activation="softmax", name="softmax")(x)
-
-    model = tf.keras.Model(inp, out, name="causal_tcn")
-    return model
+    logits = tf.keras.layers.Conv1D(num_classes, 1, padding="same", name="logits_1x1")(x)
+    out = tf.keras.layers.Activation("softmax", name="softmax")(logits)
+    return tf.keras.Model(inp, out, name="causal_dense_tcn")
 
 
 # -----------------------
-# Train / Eval (same style)
+# Training per fold
 # -----------------------
+def infer_num_channels(X_obj):
+    # Take the first non-empty sequence
+    for x in X_obj:
+        if x is not None and len(x) > 0:
+            return int(x.shape[1])
+    raise RuntimeError("Could not infer num_channels: all sequences empty?")
+
+
 def train_one_fold(fold_dir: str, out_dir: str, args):
     os.makedirs(out_dir, exist_ok=True)
 
-    X_train, y_train, X_val, y_val, X_test, y_test, class_list, meta = load_fold(fold_dir)
+    (X_train, y_train, m_train,
+     X_val, y_val, m_val,
+     X_test, y_test, m_test,
+     class_list, meta) = load_fullseq_fold(fold_dir)
+
     num_classes = len(class_list)
+    num_channels = infer_num_channels(X_train)
 
-    # Auto-detect dense vs window labels
-    # y.ndim==2 => dense per timestep (N,T)
-    dense_labels = (y_train.ndim == 2)
-    if args.force_dense:
-        dense_labels = True
-    if args.force_window:
-        dense_labels = False
+    train_ds = make_fullseq_dataset(X_train, y_train, m_train, shuffle=True, seed=args.seed)
+    val_ds   = make_fullseq_dataset(X_val,   y_val,   m_val,   shuffle=False, seed=args.seed)
+    test_ds  = make_fullseq_dataset(X_test,  y_test,  m_test,  shuffle=False, seed=args.seed)
 
-    train_ds = make_tf_dataset(X_train, y_train, batch_size=args.batch_size, shuffle=True)
-    val_ds   = make_tf_dataset(X_val, y_val, batch_size=args.batch_size, shuffle=False)
-    test_ds  = make_tf_dataset(X_test, y_test, batch_size=args.batch_size, shuffle=False)
+    steps_per_epoch  = max(1, len(X_train))  # e.g., 4
+    validation_steps = max(1, len(X_val))    # e.g., 1
+    test_steps       = max(1, len(X_test))   # e.g., 1
 
-    model = build_tcn(
-        input_shape=X_train.shape[1:],  # (T, C)
+    model = build_causal_dense_tcn(
+        num_channels=num_channels,
         num_classes=num_classes,
         filters=args.filters,
         kernel_size=args.kernel_size,
         n_blocks=args.n_blocks,
         dropout=args.dropout,
-        dense_per_timestep=dense_labels,
+        use_layernorm=args.use_layernorm,
     )
-
-    loss = tf.keras.losses.SparseCategoricalCrossentropy()
-    metric = tf.keras.metrics.SparseCategoricalAccuracy(name="acc")
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=args.lr),
-        loss=loss,
-        metrics=[metric],
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+        metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name="acc")],
     )
 
     callbacks = [
@@ -249,62 +300,71 @@ def train_one_fold(fold_dir: str, out_dir: str, args):
             filepath=os.path.join(out_dir, "best.keras"),
             monitor="val_acc",
             save_best_only=True,
-            mode="max"
+            mode="max",
         ),
         tf.keras.callbacks.EarlyStopping(
             monitor="val_acc",
             patience=7,
             mode="max",
-            restore_best_weights=True
+            restore_best_weights=True,
         ),
-        tf.keras.callbacks.CSVLogger(os.path.join(out_dir, "training_log.csv"))
+        tf.keras.callbacks.CSVLogger(os.path.join(out_dir, "training_log.csv")),
     ]
-
-    class_weight = None
-    if args.use_class_weights and not dense_labels:
-        # Keras class_weight works directly for (N,) sparse labels.
-        # For dense (N,T) labels, you typically need sample_weight masking/weights instead.
-        class_weight = compute_class_weights(y_train, num_classes)
 
     history = model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=args.epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps,
         callbacks=callbacks,
-        class_weight=class_weight,
-        verbose=1
+        verbose=1,
     )
 
-    # ----------------
-    # Evaluate + metrics
-    # ----------------
-    test_loss, test_acc = model.evaluate(test_ds, verbose=0)
+    # ---- Evaluate on test (masked metrics computed offline) ----
+    # Keras evaluate() will already apply sample_weight (mask) because dataset yields it.
+    test_loss, test_acc = model.evaluate(test_ds, steps=test_steps, verbose=0)
+    
+    # Predict per sequence and compute masked confusion/F1
+    y_pred_list = []
+    for i in range(len(X_test)):
+        X_i = X_test[i].astype(np.float32)[None, ...]  # (1, T, C)
+        prob = model.predict(X_i, verbose=0)[0]        # (T, K)
+        y_pred = np.argmax(prob, axis=-1).astype(np.int32)  # (T,)
+        y_pred_list.append(y_pred)
 
-    y_prob = model.predict(test_ds, verbose=0)
+    # Flatten masked for CM/F1
+    y_true_flat = []
+    y_pred_flat = []
+    for yt, yp, m in zip(y_test, y_pred_list, m_test):
+        keep = (m.astype(np.float32) > 0.5) & (yt.astype(np.int32) >= 0)
+        if not np.any(keep):
+            continue
+        y_true_flat.append(yt[keep].astype(np.int32))
+        y_pred_flat.append(yp[keep].astype(np.int32))
 
-    if dense_labels:
-        # y_prob: (N, T, K), y_test: (N, T)
-        y_pred = np.argmax(y_prob, axis=-1)  # (N,T)
-
-        # Flatten for confusion matrix / macro-F1
-        y_true_flat = y_test.reshape(-1)
-        y_pred_flat = y_pred.reshape(-1)
-        cm = confusion_matrix_np(y_true_flat, y_pred_flat, num_classes)
+    if len(y_true_flat) == 0:
+        cm = np.zeros((num_classes, num_classes), dtype=np.int64)
+        macro_f1 = 0.0
+        f1_per_class = [0.0] * num_classes
+        masked_acc = 0.0
     else:
-        # y_prob: (N, K), y_test: (N,)
-        y_pred = np.argmax(y_prob, axis=1)
-        cm = confusion_matrix_np(y_test, y_pred, num_classes)
+        y_true_flat = np.concatenate(y_true_flat, axis=0)
+        y_pred_flat = np.concatenate(y_pred_flat, axis=0)
+        cm = confusion_matrix_np(y_true_flat, y_pred_flat, num_classes)
+        macro_f1, f1_per_class = macro_f1_from_cm(cm)
 
-    macro_f1, f1_per_class = macro_f1_from_cm(cm)
+        # masked time-weighted accuracy across test sequences
+        masked_acc = masked_time_weighted_accuracy(y_test, y_pred_list, m_test)
 
     results = {
         "fold_dir": fold_dir,
         "out_dir": out_dir,
         "held_out_pid": meta.get("held_out_pid", None),
         "classes": class_list,
-        "dense_per_timestep": bool(dense_labels),
-        "test_acc": float(test_acc),
-        "test_macro_f1": float(macro_f1),
+        "test_acc_keras_masked": float(test_acc),      # accuracy metric under sample_weight
+        "test_acc_time_weighted_masked": float(masked_acc),
+        "test_macro_f1_masked": float(macro_f1),
         "f1_per_class": {class_list[i]: float(f1_per_class[i]) for i in range(num_classes)},
         "confusion_matrix": cm.tolist(),
         "tcn_config": {
@@ -313,14 +373,14 @@ def train_one_fold(fold_dir: str, out_dir: str, args):
             "n_blocks": int(args.n_blocks),
             "dropout": float(args.dropout),
             "causal": True,
+            "normalization": "LayerNorm" if args.use_layernorm else "BatchNorm",
         },
         "train_config": {
             "epochs": args.epochs,
-            "batch_size": args.batch_size,
+            "batch_size": 1,
             "lr": args.lr,
-            "use_class_weights": bool(args.use_class_weights),
             "seed": args.seed,
-        }
+        },
     }
 
     with open(os.path.join(out_dir, "results.json"), "w") as f:
@@ -331,8 +391,8 @@ def train_one_fold(fold_dir: str, out_dir: str, args):
 
 
 def aggregate_results(all_results):
-    accs = np.array([r["test_acc"] for r in all_results], dtype=np.float32)
-    f1s  = np.array([r["test_macro_f1"] for r in all_results], dtype=np.float32)
+    accs = np.array([r["test_acc_time_weighted_masked"] for r in all_results], dtype=np.float32)
+    f1s  = np.array([r["test_macro_f1_masked"] for r in all_results], dtype=np.float32)
 
     cms = [np.array(r["confusion_matrix"], dtype=np.int64) for r in all_results]
     cm_sum = np.sum(cms, axis=0)
@@ -347,9 +407,8 @@ def aggregate_results(all_results):
         "per_fold": [
             {
                 "held_out_pid": r.get("held_out_pid"),
-                "test_acc": r["test_acc"],
-                "test_macro_f1": r["test_macro_f1"],
-                "dense_per_timestep": r["dense_per_timestep"],
+                "test_acc": r["test_acc_time_weighted_masked"],
+                "test_macro_f1": r["test_macro_f1_masked"],
                 "out_dir": r["out_dir"],
             } for r in all_results
         ],
@@ -358,41 +417,36 @@ def aggregate_results(all_results):
 
 
 # -----------------------
-# Main (same as your CNN)
+# Main
 # -----------------------
 def main():
     ap = argparse.ArgumentParser()
 
     # --- Single-fold vs LOPO-all ---
     ap.add_argument("--fold_dir", type=str, default=None,
-                    help="Path to a single fold dir, e.g., runs/prep/fold_P22")
+                    help="Path to a single fold dir, e.g., runs/full_sequence_folds/fold_P22")
     ap.add_argument("--out_dir", type=str, default=None,
-                    help="Output dir for a single-fold run, e.g., runs/models/tcn_causal_fold_P22")
+                    help="Output dir for a single-fold run, e.g., runs/models/tcn_fullseq_causal_fold_P22")
     ap.add_argument("--all_folds", action="store_true",
                     help="Train/eval on every fold_* directory under --folds_root")
-    ap.add_argument("--folds_root", type=str, default="runs/prep",
-                    help="Directory containing fold_* folders")
-    ap.add_argument("--out_root", type=str, default="runs/models/tcn_causal_lopo",
+    ap.add_argument("--folds_root", type=str, default="../../runs/full_sequence_folds",
+                    help="Directory containing fold_* folders created by prepare_fullseq_folds.py")
+    ap.add_argument("--out_root", type=str, default="../../runs/models/tcn_fullseq_causal_lopo",
                     help="Root output directory for LOPO runs (one subdir per fold)")
 
     # --- Training hyperparams ---
     ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--batch_size", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--use_class_weights", action="store_true")
     ap.add_argument("--seed", type=int, default=42)
 
     # --- TCN hyperparams ---
     ap.add_argument("--filters", type=int, default=64)
     ap.add_argument("--kernel_size", type=int, default=3)
-    ap.add_argument("--n_blocks", type=int, default=6)
+    ap.add_argument("--n_blocks", type=int, default=7,
+                    help="Number of residual blocks; dilations are 1,2,4,...,2^(n_blocks-1)")
     ap.add_argument("--dropout", type=float, default=0.2)
-
-    # --- Label mode overrides ---
-    ap.add_argument("--force_dense", action="store_true",
-                    help="Force dense per-timestep supervision (expects y shaped (N,T))")
-    ap.add_argument("--force_window", action="store_true",
-                    help="Force window classification (expects y shaped (N,))")
+    ap.add_argument("--use_layernorm", action="store_true",
+                    help="Use LayerNorm instead of BatchNorm (recommended for batch_size=1).")
 
     args = ap.parse_args()
 
@@ -412,7 +466,7 @@ def main():
         all_results = []
         for fold_dir in fold_dirs:
             held_out = os.path.basename(fold_dir).replace("fold_", "")
-            out_dir = os.path.join(args.out_root, f"tcn_causal_fold_{held_out}")
+            out_dir = os.path.join(args.out_root, f"tcn_fullseq_causal_fold_{held_out}")
 
             print(f"\n[RUN] {fold_dir} -> {out_dir}")
             r = train_one_fold(fold_dir, out_dir, args)
