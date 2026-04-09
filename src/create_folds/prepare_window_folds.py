@@ -36,11 +36,50 @@ def estimate_fs(df):
     return float(1.0 / np.median(dt))
 
 # ---------- Feature selection ----------
-def get_feature_cols(df):
+def get_feature_cols(df, feature_set="all"):
     excl = {TIME_COL, LABEL_COL, PID_COL}
     cols = [c for c in df.columns if c not in excl]
     cols = [c for c in cols if np.issubdtype(df[c].dtype, np.number)]
-    return sorted(cols)
+
+    if feature_set == "all":
+        return sorted(cols)
+
+    # IMU feature blocks
+    accel_dyn = [c for c in cols if "_Accel" in c and c.endswith("_DYN") and "_AccelMag_DYN" not in c]
+    accel_mag_dyn = [c for c in cols if c.endswith("_AccelMag_DYN")]
+    accel_denoised = [c for c in cols if "_Accel" in c and c.endswith("_DENOISED") and "_AccelMag" not in c]
+
+    gyro_denoised = [c for c in cols if "_Gyro" in c and c.endswith("_DENOISED") and "_GyroMag" not in c]
+    gyro_dyn = [c for c in cols if "_Gyro" in c and c.endswith("_DYN") and "_GyroMag_DYN" not in c]
+    gyro_mag_dyn = [c for c in cols if c.endswith("_GyroMag_DYN")]
+
+    mag_cols = [
+        c for c in cols
+        if c.endswith("_MagX_DENOISED")
+        or c.endswith("_MagY_DENOISED")
+        or c.endswith("_MagZ_DENOISED")
+        or c.endswith("_MagMag_DENOISED")
+    ]
+
+    emg_filtered = [c for c in cols if "_EMG" in c and c.endswith("_FILTERED")]
+    emg_env = [c for c in cols if "_EMG" in c and c.endswith("_ENV")]
+
+    if feature_set == "set_a":
+        selected = accel_dyn + accel_mag_dyn + accel_denoised + gyro_denoised + gyro_dyn + gyro_mag_dyn + mag_cols
+    elif feature_set == "set_b":
+        selected = accel_dyn + accel_mag_dyn + accel_denoised + gyro_denoised + gyro_dyn + gyro_mag_dyn
+    elif feature_set == "set_c":
+        selected = accel_dyn + accel_mag_dyn + gyro_denoised + gyro_mag_dyn + mag_cols
+    elif feature_set == "set_d":
+        selected = accel_dyn + accel_mag_dyn + gyro_denoised + gyro_mag_dyn
+    elif feature_set == "imu_only":
+        selected = accel_dyn + accel_mag_dyn + accel_denoised + gyro_denoised + gyro_dyn + gyro_mag_dyn + mag_cols
+    elif feature_set == "imu_emg":
+        selected = accel_dyn + accel_mag_dyn + accel_denoised + gyro_denoised + gyro_dyn + gyro_mag_dyn + mag_cols + emg_filtered + emg_env
+    else:
+        raise ValueError(f"Unknown feature_set: {feature_set}")
+
+    return sorted(selected)
 
 def get_emg_env_cols(feature_cols):
     return [c for c in feature_cols if ("_EMG" in c and c.endswith("_ENV"))]
@@ -72,6 +111,9 @@ def compute_p95_from_dfs(dfs, emg_env_cols, pids, drop_label="Unknown", min_p95=
     excluding rows whose label is drop_label.
     Returns: dict pid -> p95 vector (len = n_emg_env_cols)
     """
+    if len(emg_env_cols) == 0:
+        return {}
+
     out = {}
     for pid in pids:
         df = dfs[pid]
@@ -95,6 +137,8 @@ def apply_p95_to_df(df, emg_env_cols, p95_vec):
     Return a copy of df where EMG envelope columns are divided by p95_vec.
     """
     df2 = df.copy()
+    if len(emg_env_cols) == 0:
+        return df2
     # ensure broadcast works: (N, n_emg) / (n_emg,)
     df2.loc[:, emg_env_cols] = df2.loc[:, emg_env_cols].to_numpy(np.float32) / p95_vec
     return df2
@@ -126,7 +170,7 @@ def y_to_int(y, class_list):
     return np.array([m[v] for v in y], dtype=np.int32)
 
 # ---------- Fold assembly ----------
-def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
+def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05, feature_set="all"):
     pids = list_pids(data_root)
     assert held_out_pid in pids
 
@@ -139,7 +183,7 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
     stride = int(round(stride_s * fs_used))
 
     # features + EMG envelope columns
-    feature_cols = get_feature_cols(dfs[pids[0]])
+    feature_cols = get_feature_cols(dfs[pids[0]], feature_set=feature_set)
     emg_env_cols = get_emg_env_cols(feature_cols)
     class_list = build_class_list(dfs)
 
@@ -149,6 +193,7 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
     val_idx = pids.index(held_out_pid) % len(train_pids)
     val_pid = train_pids[val_idx]
     print(f"[INFO] Participant {val_pid} being used for validation for held out participant split {held_out_pid}")
+    print(f"[INFO] Using feature set: {feature_set} ({len(feature_cols)} features)")
     val_pids = [val_pid]
     train_for_model = [p for p in train_pids if p != val_pid]
     test_pids = [held_out_pid]
@@ -158,18 +203,25 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
     p95_by_pid = compute_p95_from_dfs(dfs, emg_env_cols, train_pids, drop_label="Unknown")
 
     # STEP 2: get median p95 across training participants (used for held-out, and as fallback)
-    train_pids_order = [pid for pid in train_pids if pid in p95_by_pid]
-    if len(train_pids_order) == 0:
-        raise RuntimeError("No training participants had any non-Unknown rows for EMG p95 computation.")
+    if len(emg_env_cols) > 0:
+        train_pids_order = [pid for pid in train_pids if pid in p95_by_pid]
+        if len(train_pids_order) == 0:
+            raise RuntimeError("No training participants had any non-Unknown rows for EMG p95 computation.")
 
-    p95_mat = np.stack([p95_by_pid[pid] for pid in train_pids_order], axis=0)
-    p95_median = np.median(p95_mat, axis=0).astype(np.float32)
+        p95_mat = np.stack([p95_by_pid[pid] for pid in train_pids_order], axis=0)
+        p95_median = np.median(p95_mat, axis=0).astype(np.float32)
 
-    # STEP 3: normalize dfs per participant (train/val use own when available; held-out uses median)
-    def p95_for(pid):
-        return p95_by_pid.get(pid, p95_median)
+        # STEP 3: normalize dfs per participant (train/val use own when available; held-out uses median)
+        def p95_for(pid):
+            return p95_by_pid.get(pid, p95_median)
 
-    dfs_p95 = {pid: apply_p95_to_df(dfs[pid], emg_env_cols, p95_for(pid)) for pid in pids}
+        dfs_p95 = {pid: apply_p95_to_df(dfs[pid], emg_env_cols, p95_for(pid)) for pid in pids}
+        emg_norm_desc = "per-training-participant p95 computed from dfs excluding Unknown rows; held-out uses median(training p95)"
+    else:
+        train_pids_order = []
+        p95_median = np.array([], dtype=np.float32)
+        dfs_p95 = dfs
+        emg_norm_desc = "none (no EMG envelope features in selected feature set)"
 
     # --- Window all participants AFTER EMG normalization ---
     windows = {}
@@ -211,11 +263,12 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
         "fs_used": fs_used,
         "win_s": win_s, "stride_s": stride_s,
         "win_samples": win, "stride_samples": stride,
+        "feature_set": feature_set,
         "feature_cols": feature_cols,
         "emg_env_cols": emg_env_cols,
         "class_list": class_list,
         "normalization": {
-            "emg_env": "per-training-participant p95 computed from dfs excluding Unknown rows; held-out uses median(training p95)",
+            "emg_env": emg_norm_desc,
             "global": "StandardScaler fit on training windows after p95 scaling"
         }
     }
@@ -223,8 +276,12 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
         json.dump(meta, f, indent=2)
 
     # save p95 artifacts
-    np.save(os.path.join(fold_dir, "p95_train_by_pid.npy"),
-            np.stack([p95_by_pid[pid] for pid in train_pids_order], axis=0))
+    if len(train_pids_order) > 0:
+        np.save(os.path.join(fold_dir, "p95_train_by_pid.npy"),
+                np.stack([p95_by_pid[pid] for pid in train_pids_order], axis=0))
+    else:
+        np.save(os.path.join(fold_dir, "p95_train_by_pid.npy"), np.empty((0, len(emg_env_cols)), dtype=np.float32))
+
     with open(os.path.join(fold_dir, "train_pids_order.json"), "w") as f:
         json.dump(train_pids_order, f, indent=2)
     np.save(os.path.join(fold_dir, "p95_median_train.npy"), p95_median)
@@ -241,7 +298,7 @@ def prepare_fold(data_root, out_root, held_out_pid, win_s=1.0, stride_s=0.05):
     print(f"[DONE] fold {held_out_pid}: "
           f"train {X_train.shape}, val {X_val.shape}, test {X_test.shape} saved to {fold_dir}")
 
-def prepare_all_lopo(data_root, out_root, win_s=1.0, stride_s=0.05, skip_existing=True):
+def prepare_all_lopo(data_root, out_root, win_s=1.0, stride_s=0.05, skip_existing=True, feature_set="all"):
     pids = list_pids(data_root)
     print(f"[INFO] Found {len(pids)} participants: {pids}")
 
@@ -257,6 +314,7 @@ def prepare_all_lopo(data_root, out_root, win_s=1.0, stride_s=0.05, skip_existin
             held_out_pid=held_out_pid,
             win_s=win_s,
             stride_s=stride_s,
+            feature_set=feature_set,
         )
 
 
@@ -269,18 +327,47 @@ def main():
     ap.add_argument("--held_out", default=None, help="Participant ID to hold out, e.g., P40")
     ap.add_argument("--all_lopo", action="store_true", help="Run LOPO over all participants")
 
-    ap.add_argument("--win_s", type=float, default=1.0)
+    ap.add_argument("--win_s", type=float, default=1.5)
     ap.add_argument("--stride_s", type=float, default=0.05)
     ap.add_argument("--skip_existing", action="store_true", help="Skip folds that already exist")
+
+    ap.add_argument(
+        "--feature_set",
+        default="all",
+        choices=["all", "set_a", "set_b", "set_c", "set_d", "imu_only", "imu_emg"],
+        help=(
+            "Feature set to use. "
+            "set_a = all kinematics + magnetometer, "
+            "set_b = all kinematics no magnetometer, "
+            "set_c = reduced kinematics + magnetometer, "
+            "set_d = reduced kinematics no magnetometer, "
+            "imu_only = final IMU-only set (Set A), "
+            "imu_emg = final IMU-only set + EMG"
+        ),
+    )
 
     args = ap.parse_args()
 
     if args.all_lopo:
-        prepare_all_lopo(args.data_root, args.out_root, args.win_s, args.stride_s, args.skip_existing)
+        prepare_all_lopo(
+            args.data_root,
+            args.out_root,
+            args.win_s,
+            args.stride_s,
+            args.skip_existing,
+            args.feature_set,
+        )
     else:
         if args.held_out is None:
             raise SystemExit("Provide --held_out PXX or use --all_lopo")
-        prepare_fold(args.data_root, args.out_root, args.held_out, args.win_s, args.stride_s)
+        prepare_fold(
+            args.data_root,
+            args.out_root,
+            args.held_out,
+            args.win_s,
+            args.stride_s,
+            args.feature_set,
+        )
 
 
 if __name__ == "__main__":
