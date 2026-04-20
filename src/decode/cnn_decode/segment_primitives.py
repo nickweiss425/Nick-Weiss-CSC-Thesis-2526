@@ -1,19 +1,19 @@
+#!/usr/bin/env python3
 # segment_primitives.py
 #
-# Step 4: Segment Extraction and Primitive Quantification (CNN window timeline)
+# Step 6: Segment Extraction and Primitive Quantification (CNN window timeline)
 #
-# Converts hysteresis-decoded window-level labels into contiguous primitive segments
+# Converts FINAL post-processed window-level labels into contiguous primitive segments
 # with start/end times and durations, then computes per-class counts + total durations.
 #
-# Updated to match the folder/file layout:
-#   Input (per pid):
-#     {in_dir}/{pid}/{out_tag}_window_hysteresis_decoded.npz
+# Input (per pid):
+#   {in_dir}/{pid}/{out_tag}_window_gap_merged.npz
 #
-#   Output (per pid):
-#     {out_dir}/{pid}/{out_tag}_segments.npz
+# Output (per pid):
+#   {out_dir}/{pid}/{out_tag}_segments.npz
 #
 # Supports:
-#   --pid PXX      (single participant)
+#   --pid PXX
 #   --all_folds    (process all fold_* dirs under --folds_root)
 
 import os
@@ -90,13 +90,13 @@ def list_pids_from_folds(folds_root):
 
 
 def run_one(pid, args):
-    # Input: in_dir/pid/out_tag_window_hysteresis_decoded.npz
+    # Input: in_dir/pid/out_tag_window_gap_merged.npz
     pid_in_dir = os.path.join(args.in_dir, pid)
-    in_path = os.path.join(pid_in_dir, f"{args.out_tag}_window_hysteresis_decoded.npz")
+    in_path = os.path.join(pid_in_dir, f"{args.out_tag}_window_gap_merged.npz")
     d = np.load(in_path, allow_pickle=True)
 
     t_center = d[TIME_KEY].astype(np.float32)
-    y_dec = d["y_decoded"].astype(np.int32)
+    y_dec = d["y_gap_merged"].astype(np.int32)
     class_list = d["class_list"]
 
     # Convert labels -> segments
@@ -145,17 +145,17 @@ def main():
     ap.add_argument("--pid", default=None, help="Single participant ID, e.g., P40")
     ap.add_argument("--all_folds", action="store_true", help="Run for every fold_* directory")
 
-    # where to find pids (same convention as your other scripts)
+    # where to find pids
     ap.add_argument("--folds_root", default="../../../runs/window_folds/")
 
-    # input/output roots (match your saved folder structure)
+    # input/output roots
     ap.add_argument("--in_dir", default="../../../decoded/cnn_decoded/")
     ap.add_argument("--out_dir", default="../../../decoded/cnn_decoded/")
 
     # naming convention used by your inference/ema/hysteresis steps
     ap.add_argument("--out_tag", default="cnn")
 
-    # optional printing (keeps batch output readable)
+    # optional printing
     ap.add_argument("--print_summary", action="store_true",
                     help="Print per-class counts/durations for each pid")
 

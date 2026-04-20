@@ -2,11 +2,21 @@
 # decode_eval_basic_json_v2.py
 #
 # Save per-participant metrics + overall summary into a single JSON file.
-# Adds:
+#
+# This version evaluates the FINAL post-processed CNN decoded sequence from:
+#   {decoded_root}/{pid}/{out_tag}_window_gap_merged.npz
+# using:
+#   y_gap_merged
+#
+# It also reads predicted segment counts/durations from:
+#   {segment_root}/{pid}/{out_tag}_segments.npz
+#
+# Metrics:
+#   - time-weighted accuracy (TWA)
 #   - relative count error
 #   - relative duration error
 #   - temporal IoU
-# while retaining legacy MAE metrics for backward compatibility.
+#   - legacy MAE count / duration for backward compatibility
 
 import os
 import argparse
@@ -70,12 +80,18 @@ def time_weighted_accuracy(y_true, y_pred, t_center):
 
 
 def macro_relative_error(pred_vals: np.ndarray, gt_vals: np.ndarray):
-    """Mean absolute relative error over classes with nonzero GT."""
+    """
+    Mean absolute relative error over classes with nonzero GT.
+    Returns:
+      macro_relative_error, per_class_relative_error_array
+    """
     pred_vals = np.asarray(pred_vals, dtype=np.float32)
     gt_vals = np.asarray(gt_vals, dtype=np.float32)
+
     rel = np.full(gt_vals.shape, np.nan, dtype=np.float32)
     valid = gt_vals > 0
     rel[valid] = np.abs(pred_vals[valid] - gt_vals[valid]) / gt_vals[valid]
+
     return float(np.nanmean(rel)) if np.any(valid) else np.nan, rel
 
 
@@ -106,13 +122,13 @@ def run_one(pid: str, args):
     pred_counts = pred["counts"].astype(np.int32)
     pred_durs = pred["durations"].astype(np.float32)
 
-    # Load decoded labels + GT
-    dec_path = os.path.join(args.decoded_root, pid, f"{args.out_tag}_window_hysteresis_decoded.npz")
+    # Load FINAL decoded labels + GT
+    dec_path = os.path.join(args.decoded_root, pid, f"{args.out_tag}_window_gap_merged.npz")
     decoded = np.load(dec_path, allow_pickle=True)
 
     t_center = decoded["t_center"].astype(np.float32)
     y_true = decoded["y_true"].astype(np.int32)
-    y_pred_dec = decoded["y_decoded"].astype(np.int32)
+    y_pred_dec = decoded["y_gap_merged"].astype(np.int32)
 
     # Build GT segments on same time grid
     gt_segs = labels_to_segments(t_center, y_true)
@@ -120,6 +136,7 @@ def run_one(pid: str, args):
 
     # Metrics
     twa = time_weighted_accuracy(y_true, y_pred_dec, t_center)
+
     count_err = pred_counts - gt_counts
     dur_err = pred_durs - gt_durs
     mae_count = float(np.mean(np.abs(count_err))) if len(count_err) else np.nan
@@ -194,6 +211,7 @@ def summarize_rows(rows: list[dict], class_list: list):
     for name in class_list:
         col = sanitize_col(name)
         count_errs, rel_count_errs, dur_errs, rel_dur_errs, ious = [], [], [], [], []
+
         for r in rows:
             p = r.get("per_class", {})
             if col in p:
